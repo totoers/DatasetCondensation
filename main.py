@@ -16,7 +16,14 @@ def main():
     parser.add_argument('--dataset', type=str, default='CIFAR10', help='dataset')
     parser.add_argument('--model', type=str, default='ConvNet', help='model')
     parser.add_argument('--ipc', type=int, default=1, help='image(s) per class')
-    parser.add_argument('--eval_mode', type=str, default='S', help='eval_mode') # S: the same to training model, M: multi architectures,  W: net width, D: net depth, A: activation function, P: pooling layer, N: normalization layer,
+    parser.add_argument('--eval_mode', type=str, default='S', help='eval_mode') 
+    # S: the same to training model, 
+    # M: multi architectures,  
+    # W: net width, 
+    # D: net depth, 
+    # A: activation function, 
+    # P: pooling layer, 
+    # N: normalization layer,
     parser.add_argument('--num_exp', type=int, default=5, help='the number of experiments')
     parser.add_argument('--num_eval', type=int, default=20, help='the number of evaluating randomly initialized models')
     parser.add_argument('--epoch_eval_train', type=int, default=300, help='epochs to train a model with synthetic data')
@@ -55,7 +62,7 @@ def main():
 
     data_save = []
 
-
+    # 这里为啥要进行 args.num_exp 轮次，这样做的意义是什么？
     for exp in range(args.num_exp):
         print('\n================== Exp %d ==================\n '%exp)
         print('Hyper-parameters: \n', args.__dict__)
@@ -88,6 +95,7 @@ def main():
         image_syn = torch.randn(size=(num_classes*args.ipc, channel, im_size[0], im_size[1]), dtype=torch.float, requires_grad=True, device=args.device)
         label_syn = torch.tensor([np.ones(args.ipc)*i for i in range(num_classes)], dtype=torch.long, requires_grad=False, device=args.device).view(-1) # [0,0,0, 1,1,1, ..., 9,9,9]
 
+        # initialize synthetic image from random real images
         if args.init == 'real':
             print('initialize synthetic data from random real images')
             for c in range(num_classes):
@@ -97,11 +105,14 @@ def main():
 
 
         ''' training '''
+        # optimize goal: synthetic iamge
         optimizer_img = torch.optim.SGD([image_syn, ], lr=args.lr_img, momentum=0.5) # optimizer_img for synthetic data
         optimizer_img.zero_grad()
         criterion = nn.CrossEntropyLoss().to(args.device)
         print('%s training begins'%get_time())
 
+        # 这里为什么要迭代1000次，这1000次只是为了update syn image？
+        # 
         for it in range(args.Iteration+1):
 
             ''' Evaluate synthetic data '''
@@ -122,6 +133,7 @@ def main():
                     else:
                         args.epoch_eval_train = 300
 
+                    '''evaluate the performance of synthetic image'''
                     accs = []
                     for it_eval in range(args.num_eval):
                         net_eval = get_network(model_eval, channel, num_classes, im_size).to(args.device) # get a random model
@@ -144,6 +156,7 @@ def main():
 
 
             ''' Train synthetic data '''
+            # the goal of training is optimizing student model
             net = get_network(args.model, channel, num_classes, im_size).to(args.device) # get a random model
             net.train()
             net_parameters = list(net.parameters())
@@ -152,7 +165,7 @@ def main():
             loss_avg = 0
             args.dc_aug_param = None  # Mute the DC augmentation when learning synthetic data (in inner-loop epoch function) in oder to be consistent with DC paper.
 
-
+            # outer_loop 外循环 update syn image
             for ol in range(args.outer_loop):
 
                 ''' freeze the running mu and sigma for BatchNorm layers '''
@@ -189,6 +202,9 @@ def main():
 
                     output_real = net(img_real)
                     loss_real = criterion(output_real, lab_real)
+                    # autograd 内部运算逻辑是什么？
+                    # 通过得到最后结果的损失loss_real可以使用autograd反向传播得到各个节点的梯度吗？
+                    # 使用 torch.autograd.grad() 可以计算loss相对model_parameters的梯度，
                     gw_real = torch.autograd.grad(loss_real, net_parameters)
                     gw_real = list((_.detach().clone() for _ in gw_real))
 
@@ -196,6 +212,8 @@ def main():
                     loss_syn = criterion(output_syn, lab_syn)
                     gw_syn = torch.autograd.grad(loss_syn, net_parameters, create_graph=True)
 
+                    # calculate the loss of grad
+                    # 使用grad的差异作为loss，有没有考虑到网络的问题？Question: 所使用的net网络结构是确定的，但是其中的参数是随机的吗？
                     loss += match_loss(gw_syn, gw_real, args)
 
                 optimizer_img.zero_grad()
@@ -206,12 +224,15 @@ def main():
                 if ol == args.outer_loop - 1:
                     break
 
-
+                # inner_loop 更新 network
                 ''' update network '''
+                # 使用 syn image 对 model进行训练
                 image_syn_train, label_syn_train = copy.deepcopy(image_syn.detach()), copy.deepcopy(label_syn.detach())  # avoid any unaware modification
                 dst_syn_train = TensorDataset(image_syn_train, label_syn_train)
                 trainloader = torch.utils.data.DataLoader(dst_syn_train, batch_size=args.batch_train, shuffle=True, num_workers=0)
+                # 开始训练
                 for il in range(args.inner_loop):
+                    # update net
                     epoch('train', trainloader, net, optimizer_net, criterion, args, aug = True if args.dsa else False)
 
 
